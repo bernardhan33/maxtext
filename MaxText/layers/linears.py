@@ -32,7 +32,8 @@ from jax.experimental import shard_map
 import max_logging
 
 try:
-  from jax.experimental.pallas.ops.tpu import megablox as mblx
+  # from jax.experimental.pallas.ops.tpu import megablox as mblx
+  import megablox as mblx
 except ImportError:
   max_logging.log("JAX megablox is available for TPU only.")
   pass
@@ -358,7 +359,8 @@ class MoeBlock(nn.Module):
   def megablox(self, inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel):
     # tile_size = (512, 1024, 1024)
     # tile_size = (512, 1024, 896) 
-    tile_size = (512, 1536, 768) 
+    # tile_size = (512, 1536, 768) 
+    tile_size = None
     def gmm(inputs, kernel, group_sizes):
       hs_shape = inputs.shape
       # pad length is the 1st dimension of tiling size in gmm call
