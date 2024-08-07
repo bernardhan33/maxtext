@@ -319,7 +319,7 @@ class MoeBlock(nn.Module):
     w1_kernel = jnp.asarray(w1_kernel, self.dtype)
     wo_kernel = self.param(
         'wo',
-        nn.with_logical_partitioning(kernel_init, wo_kernel_axes),
+        nn.with_logical_partitioning(kernel_init, kernel_axes),
         (num_experts, mlp_dim, emb_dim),
         self.weight_dtype,
         kernel_in_axis,
@@ -356,7 +356,7 @@ class MoeBlock(nn.Module):
     return output.reshape(-1, self.config.max_target_length, self.config.emb_dim // tensor_parallelism).astype(self.dtype)
 
   def megablox(self, inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel):
-    tile_size = (256, 2048, 1536)
+    tile_size = (256, 2048, 2048)
     def gmm(inputs, kernel, group_sizes):
       hs_shape = inputs.shape
       # pad length is the 1st dimension of tiling size in gmm call
