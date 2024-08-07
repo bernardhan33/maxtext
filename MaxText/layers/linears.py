@@ -406,6 +406,7 @@ class MoeBlock(nn.Module):
       output = self.unpermute(intermediate_output,
                               sorted_selected_experts,
                               weights)
+      output = checkpoint_name(output, "gmm")
       return output
     return wrapper(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
 
