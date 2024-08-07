@@ -108,6 +108,7 @@ def apply_mask_to_logits(logits: Array, mask: Array):
 
 
 class AttentionOp(nn.Module):
+  config: Config
   mesh: Mesh
   attention_kernel: str
   max_target_length: int
@@ -216,6 +217,9 @@ class AttentionOp(nn.Module):
     axis_names = nn.logical_to_mesh_axes(self.flash_axis_names)
     segment_axis_names = nn.logical_to_mesh_axes((BATCH, "activation_length_no_heads"))
 
+    kBLOCK_1 = self.config.block_q
+    kBLOCK_2 = self.config.block_q_dkv
+    kBLOCK_3 = self.config.block_q_dq
     @functools.partial(
         shard_map,
         mesh=self.mesh,
@@ -234,15 +238,18 @@ class AttentionOp(nn.Module):
         assert (
             query.shape[2] == decoder_segment_ids.q.shape[1]
         ), "Sharding along sequence dimension not allowed in tpu kernel attention"
+      print(f"KBLOCK VALUES: {kBLOCK_1} {kBLOCK_2} {kBLOCK_3}")
       block_sizes = splash_attention_kernel.BlockSizes(
-          block_q=min(512, query.shape[2]),
-          block_kv_compute=min(512, key.shape[2]),
-          block_kv=min(512, key.shape[2]),
-          block_q_dkv=min(512, query.shape[2]),
-          block_kv_dkv=min(512, key.shape[2]),
-          block_kv_dkv_compute=min(512, query.shape[2]),
-          block_q_dq=min(512, query.shape[2]),
-          block_kv_dq=min(512, query.shape[2]),
+          block_q=min(kBLOCK_1, query.shape[2]),
+          block_kv_compute=min(kBLOCK_1, key.shape[2]),
+          block_kv=min(kBLOCK_1, key.shape[2]),
+
+          block_q_dkv=min(kBLOCK_2, query.shape[2]),
+          block_kv_dkv=min(kBLOCK_2, key.shape[2]),
+          block_kv_dkv_compute=min(kBLOCK_2, query.shape[2]),
+
+          block_q_dq=min(kBLOCK_3, query.shape[2]),
+          block_kv_dq=min(kBLOCK_3, query.shape[2]),
       )
 
       masks = [splash_attention_mask.CausalMask(shape=(query.shape[2], query.shape[2])) for i in range(query.shape[1])]
@@ -1038,6 +1045,7 @@ class Attention(nn.Module):
 
     assert not self.config.quantize_kvcache or self.kv_quant
     attention_op = AttentionOp(
+        config = self.config,
         mesh=self.mesh,
         attention_kernel=self.attention_kernel,
         max_target_length=self.max_target_length,

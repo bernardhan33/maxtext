@@ -399,3 +399,8 @@ enable_single_controller: False
 
 # Split physical axes for https://jax.readthedocs.io/en/latest/_autosummary/jax.experimental.mesh_utils.create_device_mesh.html
 allow_split_physical_axes: False
+
+### Flash attention
+block_q: 512
+block_q_dkv: 512
+block_q_dq: 512
