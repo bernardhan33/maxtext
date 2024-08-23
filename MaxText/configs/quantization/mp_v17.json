@@ -1,0 +1,9 @@
+{
+  ".*/query": {"rhs_bits": 4, "lhs_bits": 4},
+  ".*/key": {"rhs_bits": 4, "lhs_bits": 4},
+  ".*/value": {"rhs_bits": 4, "lhs_bits": 4},
+  ".*/out": {"rhs_bits": 4, "lhs_bits": 4},
+  ".*/wi_0": {"rhs_bits": 4, "lhs_bits": 4},
+  ".*/wi_1": {"rhs_bits": 4, "lhs_bits": 4},
+  ".*/wo": {"rhs_bits": 4, "lhs_bits": 4}
+}
