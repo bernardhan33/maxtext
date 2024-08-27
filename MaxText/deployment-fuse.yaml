@@ -1,0 +1,177 @@
+# Use Static provisioning to define a PV for GCSFuse: https://cloud.google.com/kubernetes-engine/docs/how-to/persistent-volumes/cloud-storage-fuse-csi-driver#provision-static.
+# For other storage solutions, please define your own PV and PVC and prefill the volume with the datasets.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: bernardhan-gcs-distributed-training-pv
+spec:
+  accessModes:
+  - ReadWriteMany
+  capacity:
+    storage: 64Gi
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: gcsfuse-sc # dummy storage class
+  claimRef:
+    name: bernardhan-training-test-claim
+    # Running in the "default" namespace so you can submit to the local queue
+    # created in the default namespace.
+    namespace: default
+  mountOptions:
+  - debug_fuse
+  - implicit-dirs #avoid if possible
+  - max-conns-per-host=0
+  - metadata-cache:ttl-secs:-1
+  - metadata-cache:stat-cache-max-size-mb:-1
+  - metadata-cache:type-cache-max-size-mb:-1
+  - file-system:kernel-list-cache-ttl-secs:-1
+  - file-cache:max-size-mb:-1
+  - file-cache:cache-file-for-range-read:false
+  - file-cache:enable-parallel-downloads:false
+  csi:
+    driver: gcsfuse.csi.storage.gke.io
+    volumeHandle: xai-hf-dataset-parquet # unique bucket name. xai-hf-dataset-parquet-10g for the 10G * 12K dataset.
+    volumeAttributes:
+      enableMetrics: "true"
+      skipCSIBucketAccessCheck: "true"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: bernardhan-training-test-claim
+  namespace: default
+spec:
+  accessModes:
+  - ReadWriteMany
+  resources:
+    requests:
+      storage: 64Gi
+  volumeName: bernardhan-gcs-distributed-training-pv
+  storageClassName: gcsfuse-sc # dummy storage class
+---
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  # Modify this name to distinguish your workload from others.
+  # Make sure to modify all occurrences of the name in this file.
+  name: bernardhan-xpk-test-workload
+  labels:
+    kueue.x-k8s.io/queue-name: multislice-queue  # Name of the LocalQueue
+    xpk.google.com/workload: bernardhan-xpk-test-workload
+  annotations:
+    alpha.jobset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool # 1:1 job replica to node pool assignment
+spec:
+  failurePolicy:
+    maxRestarts: 0
+  replicatedJobs:
+    - name: slice-job
+      replicas: 1
+      template:
+        spec:
+          parallelism: 4    # Equal to the number of VMs per slice
+          completions: 4    # Same as the above.
+          backoffLimit: 0   # When any pod fails, the job is failed
+          template:
+            metadata:
+              labels:
+                xpk.google.com/workload: bernardhan-xpk-test-workload
+              # Required for GCSFuse.
+              # For other storage solutions, please modify this section.
+              annotations:
+                gke-gcsfuse/volumes: "true"
+                gke-gcsfuse/cpu-limit: "0"
+                gke-gcsfuse/memory-limit: "0"
+                gke-gcsfuse/ephemeral-storage-limit: "0"
+
+            spec:
+              schedulerName: default-scheduler
+              restartPolicy: Never
+              affinity:
+                nodeAffinity:
+                  requiredDuringSchedulingIgnoredDuringExecution:
+                    nodeSelectorTerms:
+                    - matchExpressions:
+                      - key: cloud.google.com/gke-nodepool
+                        operator: NotIn
+                        values:
+                        - default-pool
+
+              # For GCSFuse: to make sure that the pods are running on nodes with L-SSDs.
+              # For other storage solutions that do not need L-SSDs, please remove this line.
+              nodeSelector:
+                cloud.google.com/gke-ephemeral-storage-local-ssd: "true"
+
+              priorityClassName: medium
+              hostNetwork: true
+              dnsPolicy: ClusterFirstWithHostNet
+              terminationGracePeriodSeconds: 30
+              # Set up k8s SA to access the metrics bucket: https://cloud.google.com/kubernetes-engine/docs/how-to/persistent-volumes/cloud-storage-fuse-csi-driver#authentication.
+              # For GCSFuse, also set up access to the dataset bucket.
+              serviceAccountName: bernardhan-benchmark
+              containers:
+              - name: jax-cpu
+                image: gcr.io/gcs-tess/bernardhan_training_gcsfs
+
+                env:
+                - name: REPLICATED_JOB_NAME
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.annotations['jobset.sigs.k8s.io/replicatedjob-name']
+                - name: JOB_INDEX
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.annotations['jobset.sigs.k8s.io/job-index']
+                - name: JOB_COMPLETION_INDEX
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.annotations['batch.kubernetes.io/job-completion-index']
+                # Modify the following two values too, if you intend to run the workload in smaller scale.
+                - name: PROCESSES_IN_JOB
+                  value: "4"
+                - name: JAX_PROCESS_COUNT
+                  value: "4"
+                - name: JOBSET_NAME
+                  value: "bernardhan-xpk-test-workload"
+                - name: JAX_COORDINATOR_ADDRESS
+                  value: "$(JOBSET_NAME)-$(REPLICATED_JOB_NAME)-0-0.$(JOBSET_NAME)"
+
+                ports:
+                - containerPort: 8471
+                - containerPort: 8080
+                - containerPort: 1234
+                securityContext:
+                  privileged: true
+                command:
+                - bash
+                - -c
+                - |
+                  # Modify the parameters here.
+                  # See the instructions of parameters https://github.com/google/maxtext/blob/gcs-distributed-training-benchmark/MaxText/configs/base.yml#L359.
+                  # Please modify the RUN_NAME to distinguish your run from others and add identifiers
+                  # for the storage team (HdML, PStore, GCS, etc).
+                  export RUN_NAME="bernardhan-regression"
+                  export DATASET_DIRECTORY="/mnt/gcsfuse"
+                  export EPOCHS=2
+                  export MAX_STEPS=10
+                  export LOCAL_BATCH_SIZE=32
+                  export PREFETCH_FACTOR=2
+                  export DATA_LOADER_NUM_WORKERS=10
+                  export PER_STEP_INTERVAL=0.1
+                  export DATA_LOADER_STRATEGY_NAME="FileParallelSequentialRead"
+                  export GCS_METRICS_BUCKET="distributed-training-metrics"
+
+                  # Not recommended to modify the flags below.
+                  export COMMON_RUN_FLAGS="enable_checkpointing=False hardware=cpu";
+                  export BENCHMARK_RUN_FLAGS="run_name=${RUN_NAME} dataset_directory=${DATASET_DIRECTORY} dataset_bucket= epochs=${EPOCHS} max_steps=${MAX_STEPS} local_batch_size=${LOCAL_BATCH_SIZE} prefetch_factor=${PREFETCH_FACTOR} data_loader_num_workers=${DATA_LOADER_NUM_WORKERS} per_step_interval=${PER_STEP_INTERVAL} data_loader_strategy_name=${DATA_LOADER_STRATEGY_NAME} gcs_metrics_bucket=${GCS_METRICS_BUCKET}";
+                  echo XPK Start: $(date) ; _sigterm() ( kill -SIGTERM $! 2>/dev/null;); trap _sigterm SIGTERM;(JAX_PLATFORMS=cpu python3 MaxText/standalone_dataloader.py MaxText/configs/base.yml ${BENCHMARK_RUN_FLAGS} ${COMMON_RUN_FLAGS}) & PID=$!; while kill -0 $PID 2>/dev/null; do sleep 5; done; wait $PID; EXIT_CODE=$? ;  echo XPK End: $(date); echo EXIT_CODE=$EXIT_CODE;
+
+                volumeMounts:
+                # For other storage solutions, please modify the mount path and specify it in the
+                # DATASET_DIRECTORY argument in the command above.
+                - mountPath: /mnt/gcsfuse
+                  name: gcs-pvc
+                  readOnly: true
+
+              volumes:
+              - name: gcs-pvc
+                persistentVolumeClaim:
+                  claimName: bernardhan-training-test-claim

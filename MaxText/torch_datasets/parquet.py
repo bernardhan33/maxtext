@@ -21,7 +21,8 @@ from typing import Iterable
 import torch
 from torch.utils.data import IterableDataset
 import pyarrow.parquet as pq
-
+import gcsfs
+import fsspec
 
 import max_logging
 
@@ -32,12 +33,13 @@ class ParquetIterableDataset(abc.ABC, IterableDataset):
   
   Implementers must override the `_iter_impl` method.
   """
-  def __init__(self, allocated_parquet_files: Iterable[str], columns=None, batch_size=1000):
+  def __init__(self, allocated_parquet_files: Iterable[str], columns=None, batch_size=1000, config=None):
     max_logging.log(f'Using {self.__class__.__name__} strategy.')
     max_logging.log(f'Allocated with the following data files: {allocated_parquet_files}.')
     self.allocated_parquet_files = allocated_parquet_files
     self.columns = columns
     self.batch_size = batch_size
+    self.config = config
 
   @abc.abstractmethod
   def _iter_impl(self, assigned_parquet_files: Iterable[str]) -> Iterable:
@@ -115,6 +117,25 @@ class FileParallelSequentialRead(ParquetIterableDataset):
     """File Parallel, Sequential Read iterator."""
     for each_parquet_file in assigned_parquet_files:
       table = pq.ParquetFile(each_parquet_file)
+      for batch in table.iter_batches(
+          batch_size=self.batch_size, columns=self.columns
+      ):
+        yield from batch.to_pylist()
+        
+class BaselineFileParallelSequentialRead(ParquetIterableDataset):
+  """Baseline File Parallel, Sequential Read implementation for Parquet files using gcsfs"""
+  
+  def _iter_impl(self, assigned_parquet_files: Iterable[str]) -> Iterable:
+    """File Parallel, Sequential Read iterator using gcsfs."""
+    fs = gcsfs.GCSFileSystem()
+    # Clear reference to the loop and thread.
+    # See https://github.com/dask/gcsfs/issues/379#issuecomment-839929801
+    # Only relevant for fsspec >= 0.9.0
+    fsspec.asyn.iothread[0] = None
+    fsspec.asyn.loop[0] = None
+    
+    for each_parquet_file in assigned_parquet_files:
+      table = pq.ParquetFile(fs.open(each_parquet_file, 'rb'))
       for batch in table.iter_batches(
           batch_size=self.batch_size, columns=self.columns
       ):

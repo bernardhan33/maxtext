@@ -33,8 +33,10 @@ import pyconfig
 from train import validate_train_config, setup_train_loop, setup_mesh_and_model
 import storage_utils
 
-from torch_datasets.parquet import FileParallelRandomRead, FileParallelSequentialRead
+from torch_datasets.parquet import FileParallelRandomRead, FileParallelSequentialRead, BaselineFileParallelSequentialRead
 from torch.utils.data import DataLoader, IterableDataset
+import gcsfs
+import fsspec
 
 TOTAL_TRAINING_TIME_DIRECTORY = "total_training_time"
 PER_STEP_DATA_LOADING_TIME_DIRECTORY = "per_step_data_loading_time"
@@ -45,6 +47,7 @@ HYPER_PARAMETERS_FILE_NAME = "hyperparameters.csv"
 DATA_LOADER_STRATEGIES_BY_NAME = MappingProxyType({
     'FileParallelSequentialRead': FileParallelSequentialRead,
     'FileParallelRandomRead': FileParallelRandomRead, 
+    'BaselineFileParallelSequentialRead': BaselineFileParallelSequentialRead,
 })
 STEP_BARRIER_MSG = "Synchronize all processes within a step"
 
@@ -92,18 +95,28 @@ def data_loader_strategy_type(config) -> Type[IterableDataset]:
   raise ValueError(f'data_loader_strategy of \'{name}\' is not one of the following '
                    f'supported strategies: {DATA_LOADER_STRATEGIES_BY_NAME.keys()}')
 
-def list_files_walk(start_path='.'):
-    dataset_files = []
-    for root, _, files in os.walk(start_path):
-        for file in files:
-            dataset_files.append(os.path.join(root, file))
-    return sorted(dataset_files)
+def list_files_walk(config):
+  all_files = os.walk(config.dataset_directory)
+  if config.data_loader_strategy_name == "BaselineFileParallelSequentialRead":
+    fs = gcsfs.GCSFileSystem()
+    # Clear reference to the loop and thread.
+    # See https://github.com/dask/gcsfs/issues/379#issuecomment-839929801
+    # Only relevant for fsspec >= 0.9.0
+    fsspec.asyn.iothread[0] = None
+    fsspec.asyn.loop[0] = None
+    all_files = fs.walk(config.dataset_bucket)
+  
+  dataset_files = []
+  for root, _, files in all_files:
+      for file in files:
+          dataset_files.append(os.path.join(root, file))
+  return sorted(dataset_files)
 
 def parquet_data_loader(config):
   batch_size = config.local_batch_size
 
   # On each node, we "walk" the directory to get the list of files within the dataset.
-  parquet_files = list_files_walk(config.dataset_directory)
+  parquet_files = list_files_walk(config)
 
   worker_id = jax.process_index()
 
@@ -115,6 +128,7 @@ def parquet_data_loader(config):
       allocated_parquet_files=sublists[worker_id],
       batch_size=batch_size,
       columns=["outputs", "image_base64_str"],
+      config=config,
   )
   data_loader = DataLoader(
       dataset=dataset,
